@@ -1,0 +1,849 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PairUnNormal Degens</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles for the scanner feel */
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .scanner-screen {
+            height: 350px;
+            background: rgba(0, 0, 0, 0.9);
+            border: 4px solid #4ade80; /* Neon Green */
+            box-shadow: 0 0 20px #16a34a;
+            border-radius: 1rem;
+            position: relative;
+            overflow: hidden;
+            /* Flex properties intentionally removed for absolute positioning stability */
+        }
+        /* Style for the video feed */
+        #videoFeed {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            opacity: 1;
+            transition: opacity 0.3s ease;
+        }
+        /* Visual Anomaly Canvas (New Element for Tracing) */
+        #anomalyCanvas {
+            position: absolute;
+            inset: 0;
+            z-index: 15; /* Above video, below movement indicator */
+            pointer-events: none;
+            filter: drop-shadow(0 0 10px rgba(255, 0, 0, 0.5)); /* Added a glow effect */
+            opacity: 1; /* Always visible for VAD mode */
+        }
+        /* Movement Indicator (Device Motion) */
+        #movementIndicator {
+            z-index: 20; 
+            /* Centering fix */
+            position: absolute; 
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .signal-indicator {
+            transition: all 0.2s ease;
+            filter: drop-shadow(0 0 5px);
+        }
+        /* Ensure the message overlay is visible over the video */
+        #screenMessage {
+            z-index: 30;
+            /* Absolute centering */
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
+        /* Anomaly Log styling */
+        .anomaly-log-container {
+            max-height: 200px;
+            overflow-y: auto;
+            border: 1px solid #374151;
+            background: #1f2937;
+            border-radius: 0.5rem;
+            padding: 0.5rem;
+        }
+        .anomaly-log-entry {
+            transition: background-color 0.2s;
+            line-height: 1.4;
+            cursor: pointer; /* Indicate it's clickable */
+        }
+
+        /* --- SCANNER BAR STYLES --- */
+        @keyframes scan-sweep {
+            /* Using 'left' property for reliable full-width movement */
+            0% { 
+                left: -10%; /* Start the bar completely off the left edge */
+            }
+            100% { 
+                left: 110%; /* End the bar completely off the right edge */
+            } 
+        }
+
+        #scannerBar {
+            position: absolute;
+            top: 0;
+            /* left: 0; is the default starting point when not animating */
+            width: 8px; /* Increased width from 4px to 8px for better visibility */
+            height: 100%;
+            background: #4ade80; /* Neon Green */
+            box-shadow: 0 0 10px #16a34a, 0 0 20px #16a34a;
+            z-index: 25;
+            opacity: 0; /* Hidden by default */
+            transition: opacity 0.3s ease;
+        }
+
+        .scanning-active {
+            animation: scan-sweep 1.5s linear infinite; 
+            opacity: 1 !important;
+        }
+        /* --- END SCANNER BAR STYLES --- */
+        
+        /* Modal for Anomaly Viewing */
+        #anomalyViewerModal {
+            z-index: 60;
+            transition: opacity 0.3s ease;
+        }
+    </style>
+    <!-- Load Firebase/Firestore/Auth Libraries (Required for the environment) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // --- MANDATORY FIREBASE SETUP (Kept for environment compatibility) ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+
+        if (firebaseConfig) {
+            const app = initializeApp(firebaseConfig);
+            window.db = getFirestore(app);
+            window.auth = getAuth(app);
+            
+            async function authenticate() {
+                try {
+                    if (typeof __initial_auth_token !== 'undefined') {
+                        await signInWithCustomToken(window.auth, __initial_auth_token);
+                    } else {
+                        await signInAnonymously(window.auth);
+                    }
+                    console.log("Firebase Auth Initialized.");
+                } catch (error) {
+                    console.error("Firebase Auth failed:", error);
+                }
+            }
+            authenticate();
+        }
+    </script>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen p-4 flex flex-col items-center">
+
+    <!-- Permission Modal (Initial Setup) -->
+    <div id="permissionModal" class="fixed inset-0 bg-gray-900 bg-opacity-95 z-50 flex flex-col items-center justify-center p-6 transition-opacity duration-300">
+        <div class="bg-gray-800 p-8 rounded-xl shadow-2xl max-w-lg w-full text-center border-t-4 border-green-500">
+            <h2 class="text-3xl font-bold text-green-400 mb-4">SYSTEM BOOT</h2>
+            <p id="modalPrompt" class="text-gray-300 mb-6">
+                To function, the Ghost Hunter requires access to your **Camera** (for visual scanning) and **Device Motion sensors** (for movement tracking).
+            </p>
+
+            <!-- CAMERA SELECTOR SECTION -->
+            <div id="cameraSelector" class="hidden mb-6 text-left">
+                <label for="cameraSelect" class="text-gray-300 block mb-2 font-semibold">Select Camera Source:</label>
+                <!-- Added a default option to ensure a selection is made -->
+                <select id="cameraSelect" class="w-full p-2 rounded-lg bg-gray-700 border border-gray-600 text-white focus:ring-green-500 focus:border-green-500">
+                    <option value="" disabled selected>Loading cameras...</option>
+                </select>
+            </div>
+            <!-- END NEW SECTION -->
+
+            <button id="startButton" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 rounded-lg transition duration-200 shadow-lg shadow-green-500/50">
+                START ANALYZER
+            </button>
+        </div>
+    </div>
+
+    <h1 class="text-4xl font-extrabold mb-8 text-green-400 drop-shadow-lg text-center">
+        PairUnNormal Degens
+    </h1>
+
+    <!-- Mode Switch -->
+    <div id="modeSwitch" class="cursor-pointer mb-6 text-sm font-semibold p-2 rounded-full border border-gray-700 bg-gray-800 hover:bg-gray-700 transition duration-150">
+        <span id="currentMode" class="text-yellow-400">MODE: VISUAL ANOMALY DETECTION (VAD)</span>
+    </div>
+
+    <div class="w-full max-w-xl">
+        
+        <!-- Scanner Display Area -->
+        <div class="scanner-screen relative mb-6">
+            <!-- Video Feed Element -->
+            <video id="videoFeed" autoplay playsinline class="absolute inset-0"></video>
+            
+            <!-- Anomaly Detection Canvas (Traces motion in red) -->
+            <canvas id="anomalyCanvas"></canvas>
+
+            <!-- SCANNER BAR ELEMENT -->
+            <div id="scannerBar" class=""></div>
+
+            <!-- Movement Indicator (Device Motion Mode) -->
+            <div id="movementIndicator" class="absolute inset-0 flex items-center justify-center opacity-0 pointer-events-none transition-opacity duration-200">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-20 w-20 text-red-500 signal-indicator" viewBox="0 0 20 20" fill="currentColor" style="filter: drop-shadow(0 0 10px #ef4444);">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd" />
+                </svg>
+                <span class="text-xl font-bold text-red-500 ml-4" style="text-shadow: 0 0 5px #ef4444;">DEVICE MOTION DETECTED</span>
+            </div>
+            
+            <!-- Screen Message Overlay - Only used for Initializing, Standby, or Motion Mode/Error -->
+            <span id="screenMessage" class="absolute text-lg text-green-400 p-4 bg-gray-900/50 rounded z-30">Initializing Sensors...</span>
+        </div>
+
+        <!-- Controls -->
+        <div class="flex justify-between items-center bg-gray-800 p-4 rounded-xl border border-gray-700 mb-6">
+            <div id="status" class="text-sm font-mono text-gray-400">
+                STATUS: OFFLINE
+            </div>
+            <button id="toggleButton" class="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-6 rounded-lg transition duration-200 hidden">
+                STOP
+            </button>
+        </div>
+
+        <!-- Anomaly Log Section -->
+        <div class="anomaly-log-container">
+            <!-- Log Heading and Clear Button -->
+            <div class="flex justify-between items-center mb-2 border-b border-gray-700 pb-1">
+                <h3 class="text-lg font-bold text-green-400">ANOMALY LOG</h3>
+                <button id="clearLogButton" class="text-xs text-gray-400 hover:text-red-400 transition duration-150 py-1 px-2 rounded-md bg-gray-700 hover:bg-gray-600">
+                    Clear Log
+                </button>
+            </div>
+            <div id="anomalyLog" class="text-xs text-red-400 flex flex-col-reverse">
+                <!-- Log entries will be prepended here -->
+                <div class="text-gray-500 font-mono p-1">System ready. Awaiting first anomaly.</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Anomaly Viewer Modal (New UI Element) -->
+    <div id="anomalyViewerModal" class="fixed inset-0 bg-gray-900 bg-opacity-70 backdrop-blur-sm hidden flex items-center justify-center p-4">
+        <div class="bg-gray-800 p-6 rounded-xl shadow-2xl max-w-xl w-full border-t-4 border-red-500 relative">
+            <h2 class="text-2xl font-bold text-red-400 mb-4">ANOMALY REPLAY</h2>
+            <p id="modalTimestamp" class="text-sm text-gray-400 mb-4 font-mono"></p>
+            
+            <!-- Image holder. Use max-w-full and h-auto for responsiveness -->
+            <img id="anomalyImage" src="" alt="Anomaly Scan Image" class="w-full h-auto rounded-lg border border-gray-700 shadow-lg mb-6">
+            
+            <p id="modalScore" class="text-lg text-yellow-400 font-semibold mb-6"></p>
+
+            <button id="closeViewerButton" class="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-lg transition duration-200 shadow-lg shadow-red-500/50">
+                CLOSE VIEWER
+            </button>
+        </div>
+    </div>
+    <!-- End Anomaly Viewer Modal -->
+
+    <script>
+        // Global state and constants
+        let isRunning = false;
+        let mode = 'vad'; // Default to Visual Anomaly Detection
+        
+        // --- Device Motion State ---
+        let lastAlpha = 0;
+        let lastBeta = 0;
+        let lastGamma = 0;
+        const MOVEMENT_THRESHOLD = 5; // Degrees of change to register as device motion
+
+        // --- Visual Anomaly Detection (VAD) State ---
+        let hiddenCanvas = null; // Used for low-res frame calculation
+        let hiddenCtx = null;
+        let anomalyCtx = null; // Used for high-res drawing
+        let lastFrameData = null;
+        const VAD_SENSITIVITY = 25; // Color difference threshold (higher means less sensitive)
+        const VAD_THRESHOLD = 0.003; // Percentage of pixels changed to trigger full log event (0.3%)
+        let animationLoopId = null;
+
+        // --- Logging State ---
+        let lastLogTime = 0;
+        const LOG_COOLDOWN = 5000; // 5 seconds (5000ms) cooldown for logging
+
+        // DOM Elements
+        const permissionModal = document.getElementById('permissionModal');
+        const startButton = document.getElementById('startButton');
+        const modalPrompt = document.getElementById('modalPrompt');
+        const toggleButton = document.getElementById('toggleButton');
+        const statusDisplay = document.getElementById('status');
+        const screenMessage = document.getElementById('screenMessage');
+        const modeSwitch = document.getElementById('modeSwitch');
+        const currentModeDisplay = document.getElementById('currentMode');
+        const videoFeed = document.getElementById('videoFeed');
+        const movementIndicator = document.getElementById('movementIndicator');
+        const anomalyCanvas = document.getElementById('anomalyCanvas');
+        const anomalyLogElement = document.getElementById('anomalyLog'); 
+        const clearLogButton = document.getElementById('clearLogButton'); 
+        // CAMERA SELECTOR ELEMENTS
+        const cameraSelector = document.getElementById('cameraSelector');
+        const cameraSelect = document.getElementById('cameraSelect');
+        // SCANNER BAR ELEMENT
+        const scannerBar = document.getElementById('scannerBar');
+        // ANOMALY VIEWER MODAL ELEMENTS
+        const anomalyViewerModal = document.getElementById('anomalyViewerModal');
+        const closeViewerButton = document.getElementById('closeViewerButton');
+        const anomalyImage = document.getElementById('anomalyImage');
+        const modalTimestamp = document.getElementById('modalTimestamp');
+        const modalScore = document.getElementById('modalScore');
+
+
+        // Store video devices globally once they are enumerated
+        let availableVideoDevices = [];
+        
+        // --- Logging Functions ---
+
+        /**
+         * Clears all entries from the Anomaly Log.
+         */
+        function clearAnomalyLog() {
+            anomalyLogElement.innerHTML = '';
+            
+            // Re-add the initial standby message
+            const initialMessage = document.createElement('div');
+            initialMessage.className = "text-gray-500 font-mono p-1";
+            initialMessage.textContent = 'System ready. Awaiting first anomaly.';
+            anomalyLogElement.prepend(initialMessage); // Use prepend for consistency
+            
+            console.log("Anomaly Log Cleared.");
+        }
+
+        /**
+         * Shows the Anomaly Viewer Modal with the captured frame data.
+         * @param {string} base64Image - The captured anomaly frame as a base64 data URL.
+         * @param {string} timestamp - The time the anomaly occurred.
+         * @param {string} score - The score/strength of the anomaly.
+         */
+        function showAnomalyViewer(base64Image, timestamp, score) {
+            anomalyImage.src = base64Image;
+            modalTimestamp.textContent = `Timestamp: ${timestamp}`;
+            modalScore.textContent = `Anomaly Strength: ${score}`;
+            anomalyViewerModal.classList.remove('hidden');
+        }
+
+        /**
+         * Captures the current state of the anomaly canvas with a black background.
+         * This uses a temporary canvas to ensure cross-device reliability.
+         * @returns {string} Base64 data URL of the captured image.
+         */
+        function captureAnomalyFrame() {
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = anomalyCanvas.width;
+            tempCanvas.height = anomalyCanvas.height;
+            const tempCtx = tempCanvas.getContext('2d');
+
+            // 1. Draw solid black background
+            tempCtx.fillStyle = '#000000';
+            tempCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
+
+            // 2. Draw the live anomaly canvas (red traces) on top of the black background
+            // The red traces are drawn using 'lighter' on the live canvas, so drawing the canvas itself 
+            // should carry over the visual effect correctly onto the black background.
+            tempCtx.drawImage(anomalyCanvas, 0, 0);
+
+            // 3. Return the data URL from the clean, temporary canvas
+            return tempCanvas.toDataURL('image/png');
+        }
+
+        /**
+         * Logs a significant anomaly event and captures the current frame.
+         */
+        function logAnomaly(score) {
+            const now = Date.now();
+            if (now - lastLogTime < LOG_COOLDOWN) {
+                return; // Throttle logging
+            }
+            lastLogTime = now;
+
+            const date = new Date(now);
+            const timeString = date.toLocaleTimeString('en-US', { 
+                hour: '2-digit', 
+                minute: '2-digit', 
+                second: '2-digit', 
+                hour12: false 
+            });
+
+            // 1. Capture the current anomaly canvas state (the red trace) using the robust function
+            if (anomalyCtx) {
+                const base64Image = captureAnomalyFrame();
+                
+                const logEntry = document.createElement('div');
+                logEntry.className = "anomaly-log-entry text-red-400 font-mono p-1 border-b border-gray-700/50 hover:bg-gray-700/50";
+                
+                // Use a custom attribute to store the base64 image data
+                logEntry.dataset.image = base64Image;
+                logEntry.dataset.timestamp = timeString;
+                const scoreText = (score * 100).toFixed(2) + '%';
+                logEntry.dataset.score = scoreText;
+
+                logEntry.innerHTML = `<span class="text-green-400">[${timeString}]</span> **ANOMALY DETECTED** - Strength: <span class="text-yellow-400">${scoreText}</span>`;
+
+                // Add click listener to show the viewer
+                logEntry.addEventListener('click', () => {
+                    // Use the data attributes from the log entry instead of passing global variables
+                    showAnomalyViewer(
+                        logEntry.dataset.image, 
+                        logEntry.dataset.timestamp, 
+                        logEntry.dataset.score
+                    );
+                });
+
+                // Add the new entry to the top of the log (prepend)
+                anomalyLogElement.prepend(logEntry);
+            }
+        }
+
+
+        // --- VAD Logic: Visual Anomaly Detection and Tracing ---
+
+        function initVAD() {
+            // 1. Initialize HIDDEN canvas (low res for calculation performance)
+            hiddenCanvas = document.createElement('canvas');
+            const scale = 0.5; // Process at half resolution (2x faster)
+            hiddenCanvas.width = videoFeed.videoWidth * scale;
+            hiddenCanvas.height = videoFeed.videoHeight * scale;
+            hiddenCtx = hiddenCanvas.getContext('2d');
+            
+            // 2. Initialize VISIBLE canvas (high res for drawing accuracy)
+            anomalyCanvas.width = videoFeed.videoWidth;
+            anomalyCanvas.height = videoFeed.videoHeight;
+            anomalyCtx = anomalyCanvas.getContext('2d');
+            
+            // Initial clear
+            anomalyCtx.fillStyle = 'rgba(0, 0, 0, 0)';
+            anomalyCtx.fillRect(0, 0, anomalyCanvas.width, anomalyCanvas.height);
+            
+            if (!animationLoopId) {
+                processVideoFrame();
+            }
+        }
+
+        function processVideoFrame() {
+            animationLoopId = requestAnimationFrame(processVideoFrame);
+
+            if (!isRunning || mode !== 'vad' || !hiddenCtx || videoFeed.paused || videoFeed.ended) {
+                // If not in VAD mode or stopped, continue loop but gently fade the canvas
+                if (anomalyCtx) {
+                    anomalyCtx.globalCompositeOperation = 'source-over';
+                    anomalyCtx.fillStyle = 'rgba(0, 0, 0, 0.01)'; // Very slow fade
+                    anomalyCtx.fillRect(0, 0, anomalyCanvas.width, anomalyCanvas.height);
+                }
+                return;
+            }
+
+            // --- 1. Decay Effect (Creates the ghost trail/persistence) ---
+            anomalyCtx.globalCompositeOperation = 'source-over';
+            anomalyCtx.fillStyle = 'rgba(0, 0, 0, 0.08)'; // Fade speed
+            anomalyCtx.fillRect(0, 0, anomalyCanvas.width, anomalyCanvas.height);
+            
+            // 2. Draw current frame onto the hidden canvas (low-res calculation)
+            hiddenCtx.drawImage(videoFeed, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
+            const currentFrameData = hiddenCtx.getImageData(0, 0, hiddenCanvas.width, hiddenCanvas.height).data;
+
+            if (lastFrameData) {
+                // 3. Detect motion and draw the anomaly trail
+                drawAnomalyTrail(currentFrameData, lastFrameData);
+            }
+
+            // 4. Save the current frame data
+            lastFrameData = new Uint8ClampedArray(currentFrameData); 
+        }
+
+        function drawAnomalyTrail(currentData, lastData) {
+            let changedPixels = 0;
+            const dataLength = currentData.length;
+            
+            const anomalyImageData = hiddenCtx.createImageData(hiddenCanvas.width, hiddenCanvas.height);
+            const anomalyData = anomalyImageData.data;
+            
+            const VAD_SENSITIVITY_SQ = VAD_SENSITIVITY * VAD_SENSITIVITY;
+            
+            for (let i = 0; i < dataLength; i += 4) {
+                const rDiff = currentData[i] - lastData[i];
+                const gDiff = currentData[i + 1] - lastData[i + 1];
+                const bDiff = currentData[i + 2] - lastData[i + 2];
+                const diffSq = rDiff * rDiff + gDiff * gDiff + bDiff * bDiff;
+
+                if (diffSq > VAD_SENSITIVITY_SQ) {
+                    changedPixels++;
+                    
+                    anomalyData[i] = 255;      
+                    anomalyData[i + 1] = 50;   
+                    anomalyData[i + 2] = 50;   
+                    anomalyData[i + 3] = 255;  
+                } else {
+                    anomalyData[i + 3] = 0; 
+                }
+            }
+            
+            hiddenCtx.putImageData(anomalyImageData, 0, 0);
+
+            anomalyCtx.globalCompositeOperation = 'lighter';
+            anomalyCtx.drawImage(hiddenCanvas, 0, 0, anomalyCanvas.width, anomalyCanvas.height);
+            
+            // --- Update Status and Log ---
+            const totalPixels = dataLength / 4;
+            const anomalyScore = changedPixels / totalPixels;
+
+            if (anomalyScore > VAD_THRESHOLD) {
+                // If anomaly detected, show RED status and log
+                statusDisplay.innerHTML = `<span class="text-red-500 font-bold">!!! VISUAL ANOMALY DETECTED (${(anomalyScore * 100).toFixed(3)}%)</span>`;
+                logAnomaly(anomalyScore); 
+                screenMessage.style.opacity = 0; // Hide message on anomaly
+            } else {
+                // If no anomaly, show GREEN/default status and keep screen message hidden
+                statusDisplay.innerHTML = `STATUS: Visual Scanning Active...`;
+                screenMessage.style.opacity = 0;
+            }
+        }
+
+
+        // --- Device Motion Logic: Device Orientation (Movement) ---
+        
+        /**
+         * Core Device Movement Detection Logic.
+         */
+        function handleDeviceOrientation(event) {
+            if (!isRunning || mode !== 'motion') return;
+
+            const alpha = event.alpha || 0;
+            const beta = event.beta || 0;
+            const gamma = event.gamma || 0;
+
+            const diffAlpha = Math.abs(alpha - lastAlpha);
+            const diffBeta = Math.abs(beta - lastBeta);
+            const diffGamma = Math.abs(gamma - lastGamma);
+
+            const totalChange = diffAlpha + diffBeta + diffGamma;
+
+            if (totalChange > MOVEMENT_THRESHOLD * 2) {
+                movementIndicator.style.opacity = 1;
+                movementIndicator.style.filter = 'drop-shadow(0 0 15px #f87171)';
+            } else if (totalChange > MOVEMENT_THRESHOLD) {
+                movementIndicator.style.opacity = 0.5;
+                movementIndicator.style.filter = 'drop-shadow(0 0 5px #f87171)';
+            } else {
+                movementIndicator.style.opacity = 0;
+                if (totalChange < 0.5) {
+                    lastAlpha = alpha;
+                    lastBeta = beta;
+                    lastGamma = gamma;
+                }
+            }
+
+            // Update status only if the current mode is 'motion'
+            if (mode === 'motion') {
+                statusDisplay.innerHTML = `STATUS: MOTION TRACKING (Alpha: ${alpha.toFixed(1)}&deg; | Beta: ${beta.toFixed(1)}&deg; | Gamma: ${gamma.toFixed(1)}&deg;)`;
+            }
+        }
+
+        /**
+         * Requests Device Orientation permission (required for iOS 13+).
+         */
+        function initDeviceOrientation() {
+            if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+                DeviceOrientationEvent.requestPermission()
+                    .then(permissionState => {
+                        if (permissionState === 'granted') {
+                            window.addEventListener('deviceorientation', handleDeviceOrientation);
+                            console.log("Device Orientation Permission Granted.");
+                        } else {
+                            console.error("Device Orientation Permission Denied.");
+                            screenMessage.textContent = "DEVICE MOTION DENIED. VAD mode is still available.";
+                        }
+                    })
+                    .catch(error => {
+                        console.error("Device Orientation Request Error:", error);
+                        screenMessage.textContent = "DEVICE MOTION FAILED: Check console for details.";
+                    });
+            } else {
+                window.addEventListener('deviceorientation', handleDeviceOrientation);
+                console.log("Device Orientation Listener Added (No explicit permission needed).");
+            }
+        }
+
+
+        // --- Control Functions ---
+
+        /**
+         * Toggles the CSS animation for the scanning bar based on mode and running state.
+         */
+        function updateScannerBarVisibility() {
+            if (isRunning && mode === 'vad') {
+                scannerBar.classList.add('scanning-active');
+            } else {
+                scannerBar.classList.remove('scanning-active');
+            }
+        }
+
+        function toggleMode() {
+            if (!isRunning) return;
+
+            if (mode === 'vad') {
+                // Switching to Motion Mode
+                mode = 'motion';
+                currentModeDisplay.textContent = 'MODE: DEVICE MOTION TRACKING';
+                statusDisplay.innerHTML = 'STATUS: ACTIVE (Listening for device movement)';
+                screenMessage.textContent = 'MOTION TRACKING ACTIVE. Move device to detect activity.';
+                screenMessage.style.opacity = 1; // Show message in motion mode
+                videoFeed.style.opacity = 0.3; // Dim video to emphasize motion indicator
+                movementIndicator.style.opacity = 0; // Reset movement indicator initially
+                
+                if (anomalyCtx) anomalyCtx.clearRect(0, 0, anomalyCanvas.width, anomalyCanvas.height);
+                anomalyCanvas.style.opacity = 0; 
+            } else {
+                // Switching back to VAD Mode
+                mode = 'vad';
+                currentModeDisplay.textContent = 'MODE: VISUAL ANOMALY DETECTION (VAD)';
+                statusDisplay.innerHTML = 'STATUS: Visual Scanning Active...';
+                screenMessage.textContent = ''; // Clear message for VAD mode when running
+                screenMessage.style.opacity = 0; // Hide message in VAD mode
+                videoFeed.style.opacity = 1; // Full video visibility
+                movementIndicator.style.opacity = 0; // Hide device motion indicator
+                anomalyCanvas.style.opacity = 1; // Show the canvas element itself
+            }
+            updateScannerBarVisibility();
+            console.log(`Mode switched to: ${mode}`);
+        }
+
+        function toggleScanner() {
+            isRunning = !isRunning;
+            if (isRunning) {
+                // STARTING
+                toggleButton.textContent = "STOP";
+                toggleButton.classList.remove('bg-green-600', 'hover:bg-green-700');
+                toggleButton.classList.add('bg-red-600', 'hover:bg-red-700');
+                
+                if (mode === 'vad') {
+                    statusDisplay.innerHTML = 'STATUS: Visual Scanning Active...';
+                    screenMessage.textContent = ''; // REMOVED TEXT OVERLAY for VAD
+                    screenMessage.style.opacity = 0; 
+                    videoFeed.style.opacity = 1;
+                    anomalyCanvas.style.opacity = 1;
+                } else {
+                    statusDisplay.innerHTML = 'STATUS: ACTIVE (Listening for device movement)';
+                    screenMessage.textContent = 'MOTION TRACKING ACTIVE. Move device to detect activity.';
+                    screenMessage.style.opacity = 1;
+                    videoFeed.style.opacity = 0.3;
+                    anomalyCanvas.style.opacity = 0;
+                }
+            } else {
+                // STOPPING
+                toggleButton.textContent = "START";
+                toggleButton.classList.remove('bg-red-600', 'hover:bg-red-700');
+                toggleButton.classList.add('bg-green-600', 'hover:bg-green-700');
+                statusDisplay.innerHTML = 'STATUS: STANDBY';
+                screenMessage.textContent = 'SYSTEM STANDBY. Press START to resume.';
+                screenMessage.style.opacity = 1;
+                videoFeed.style.opacity = 0.1; 
+                movementIndicator.style.opacity = 0;
+                anomalyCanvas.style.opacity = 0;
+            }
+            updateScannerBarVisibility();
+        }
+
+
+        // --- Camera Selection Logic ---
+
+        /**
+         * Populates the camera selector dropdown with available video devices.
+         */
+        function populateCameraSelector(devices) {
+            cameraSelect.innerHTML = '';
+            devices.forEach((device, index) => {
+                const option = document.createElement('option');
+                option.value = device.deviceId;
+                
+                let label = device.label || `Camera ${index + 1}`;
+                
+                // Set default labels if the browser doesn't expose them until stream starts
+                // Updated heuristic for better Android compatibility
+                if (label.toLowerCase().includes('back') || label.toLowerCase().includes('environment')) {
+                    label = 'Rear Camera (External)';
+                } else if (label.toLowerCase().includes('front') || label.toLowerCase().includes('user')) {
+                    label = 'Front Camera (Selfie)';
+                } else if (devices.length === 2) {
+                    // If only two devices and labels are generic, assume standard ordering
+                    label = index === 0 ? 'Front Camera (Selfie)' : 'Rear Camera (External)';
+                } else {
+                    label = `Aux Camera ${index + 1}`;
+                }
+
+                option.textContent = label;
+                cameraSelect.appendChild(option);
+            });
+        }
+        
+        /**
+         * Starts the video feed with the specified camera device ID or facing mode.
+         * @param {string} selectedOption - Device ID or "environment" or "user" string.
+         */
+        async function startScanner(selectedOption) {
+            // 1. Hide modal and show toggle button
+            permissionModal.classList.add('opacity-0');
+            setTimeout(() => permissionModal.classList.add('hidden'), 300);
+            toggleButton.classList.remove('hidden');
+
+            // 2. Set initial scanner state to RUNNING
+            toggleScanner(); // Correctly flips state from 'false' to 'true' and sets UI to start
+
+            // 3. Request Device Orientation Permission
+            initDeviceOrientation();
+
+            // 4. Determine constraints
+            let constraints = { video: true }; // Default to any camera
+
+            if (selectedOption) {
+                // If a deviceId was selected
+                if (availableVideoDevices.some(d => d.deviceId === selectedOption)) {
+                    constraints.video = { deviceId: { exact: selectedOption } };
+                    console.log(`Attempting stream via Device ID: ${selectedOption}`);
+                } 
+                // If a facingMode was requested directly (e.g., fallback logic)
+                else if (selectedOption === 'environment' || selectedOption === 'user') {
+                    constraints.video = { facingMode: selectedOption };
+                    console.log(`Attempting stream via facingMode: ${selectedOption}`);
+                }
+            } else {
+                // Default, try environment-facing (rear camera) first if no selection was made
+                constraints.video = { facingMode: 'environment' };
+                console.log('Attempting stream via default facingMode: environment');
+            }
+            
+            // 5. Request Media Stream (Camera)
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                
+                videoFeed.srcObject = stream;
+                videoFeed.play();
+                
+                videoFeed.onloadedmetadata = initVAD;
+                
+                videoFeed.style.display = 'block'; 
+                screenMessage.textContent = ''; // Clear message immediately upon successful stream start
+                console.log(`Media Stream (Video) Granted.`);
+
+            } catch (err) {
+                console.error('Media stream error:', err);
+
+                let errorType = "Unknown Error";
+                if (err.name === "NotAllowedError" || err.name === "SecurityError") {
+                    errorType = "PERMISSION BLOCKED";
+                } else if (err.name === "NotFoundError") {
+                    errorType = "CAMERA NOT FOUND (Device ID or facingMode failed)";
+                } else if (err.name === "ConstraintNotSatisfiedError") {
+                    errorType = "CONSTRAINT FAILED (Requested camera unavailable)";
+                }
+
+                // Show modal again on failure
+                modalPrompt.textContent = `${errorType}: Your browser is preventing camera access or the requested camera is unavailable. Please check the **URL bar** for a blocked icon or try selecting a different camera option.`;
+                permissionModal.classList.remove('hidden', 'opacity-0'); 
+                startButton.textContent = "RETRY ANALYZER";
+                startButton.disabled = false;
+                
+                // Manually stop and update UI on failure
+                if (isRunning) {
+                     isRunning = false;
+                     toggleScanner(); // Runs STOP logic
+                } else {
+                    // Update button state visually even if not strictly 'toggling'
+                    toggleButton.textContent = "START";
+                    toggleButton.classList.remove('bg-red-600', 'hover:bg-red-700');
+                    toggleButton.classList.add('bg-green-600', 'hover:bg-green-700');
+                }
+            }
+        }
+
+        /**
+         * Main function to request permissions, list devices, and handle camera selection UI.
+         */
+        async function requestPermissionsAndStart() {
+            startButton.disabled = true;
+            startButton.textContent = "Scanning for devices...";
+            cameraSelect.innerHTML = '<option value="" disabled selected>Loading cameras...</option>';
+
+
+            try {
+                // 1. Request temporary stream to unlock device labels
+                const tempStream = await navigator.mediaDevices.getUserMedia({ video: true });
+                
+                // 2. Enumerate devices
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                availableVideoDevices = devices.filter(device => device.kind === 'videoinput');
+                
+                // 3. Stop the temporary stream immediately
+                tempStream.getTracks().forEach(track => track.stop());
+
+                if (availableVideoDevices.length > 1) {
+                    // Multiple cameras found: show selector
+                    populateCameraSelector(availableVideoDevices);
+                    cameraSelector.classList.remove('hidden');
+                    startButton.textContent = "CONTINUE WITH SELECTED CAMERA";
+                    startButton.disabled = false;
+                    modalPrompt.textContent = "Multiple camera sources detected. Please select the camera you wish to use for the scan.";
+                    
+                    // Update start button listener to use the selected camera ID
+                    startButton.removeEventListener('click', requestPermissionsAndStart);
+                    startButton.addEventListener('click', () => {
+                        const selectedId = cameraSelect.value;
+                        if (selectedId) {
+                            startScanner(selectedId);
+                        }
+                    }, { once: true });
+
+                } else if (availableVideoDevices.length === 1) {
+                    // Only one camera found: start immediately with its ID
+                    modalPrompt.textContent = "Single camera source detected. Starting visual analyzer...";
+                    await startScanner(availableVideoDevices[0].deviceId);
+                } else {
+                    // No cameras found
+                    modalPrompt.textContent = "No camera devices found. Visual scanning is unavailable.";
+                    startButton.textContent = "RETRY ANALYZER";
+                    startButton.disabled = false;
+                }
+
+            } catch (err) {
+                // Handle permission denial or other initial errors
+                console.error('Initial media request failed:', err);
+                modalPrompt.textContent = `CAMERA ACCESS BLOCKED: Your browser is preventing camera access. Please check the **URL bar** for a blocked icon or go to your browser settings to allow media access for this page.`;
+                startButton.textContent = "RETRY ANALYZER";
+                startButton.disabled = false;
+            }
+        }
+
+
+        // --- Initialization ---
+
+        window.onload = () => {
+            toggleButton.classList.add('hidden'); 
+            videoFeed.style.display = 'none';
+
+            permissionModal.classList.remove('hidden', 'opacity-0');
+
+            // Initial click starts the process of listing and selecting cameras
+            startButton.addEventListener('click', requestPermissionsAndStart);
+            toggleButton.addEventListener('click', toggleScanner);
+            modeSwitch.addEventListener('click', toggleMode);
+            
+            if (clearLogButton) {
+                clearLogButton.addEventListener('click', clearAnomalyLog);
+            }
+
+            // Close viewer modal event listener
+            closeViewerButton.addEventListener('click', () => {
+                anomalyViewerModal.classList.add('hidden');
+            });
+        };
+    </script>
+</body>
+</html>
